@@ -1,4 +1,4 @@
-const CACHE_NAME = 'byma-trader-v2';
+const CACHE_NAME = 'byma-trader-v3';
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -25,17 +25,46 @@ self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(names =>
       Promise.all(names.filter(n => n !== CACHE_NAME).map(n => caches.delete(n)))
-    )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
+});
+
+self.addEventListener('message', event => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
+
+  // Yahoo/proxy: network only
   if (url.hostname.includes('yahoo') || url.hostname.includes('corsproxy') || url.hostname.includes('allorigins')) {
-    event.respondWith(fetch(event.request).catch(() => new Response('{"error":"offline"}', { headers: { 'Content-Type': 'application/json' } })));
+    event.respondWith(
+      fetch(event.request).catch(() => new Response('{"error":"offline"}', { headers: { 'Content-Type': 'application/json' } }))
+    );
     return;
   }
+
+  // HTML/app shell: network-first (siempre busca version nueva)
+  const isHTML = event.request.mode === 'navigate' ||
+                 url.pathname.endsWith('.html') ||
+                 url.pathname === '/' ||
+                 url.pathname.endsWith('/');
+  if (isHTML) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .then(response => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request).then(r => r || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Static assets (JS/CSS/fonts): cache-first
   event.respondWith(
     caches.match(event.request).then(cached => {
       if (cached) return cached;
@@ -45,10 +74,7 @@ self.addEventListener('fetch', event => {
           caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
         }
         return response;
-      }).catch(() => {
-        if (event.request.mode === 'navigate') return caches.match('./index.html');
-        return new Response('Offline', { status: 503 });
-      });
+      }).catch(() => new Response('Offline', { status: 503 }));
     })
   );
 });
