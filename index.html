@@ -478,6 +478,14 @@ function analyze(candles) {
   if (!candles || candles.length < 60) return null;
   const c = candles.map(x => x.c),
     L = candles.length - 1;
+  // 52 semanas = 252 días hábiles
+  const window52w = candles.slice(Math.max(0, L - 252));
+  const high52w = Math.max.apply(null, window52w.map(x => x.h));
+  const low52w = Math.min.apply(null, window52w.map(x => x.l));
+  const pctFromHigh = ((c[L] - high52w) / high52w) * 100; // negativo = abajo del max
+  const pctFromLow = ((c[L] - low52w) / low52w) * 100; // positivo = arriba del min
+  // Posición relativa 0-1 entre min y max
+  const rangePos = high52w !== low52w ? (c[L] - low52w) / (high52w - low52w) : 0.5;
   const rsi = TA.rsi(c),
     macd = TA.macd(c),
     bb = TA.bollinger(c),
@@ -497,6 +505,11 @@ function analyze(candles) {
     ema21 = TA.ema(c, 21);
   return {
     price: c[L],
+    high52w: high52w,
+    low52w: low52w,
+    pctFromHigh: pctFromHigh,
+    pctFromLow: pctFromLow,
+    rangePos: rangePos,
     rsi: rsi[L],
     macd: {
       line: macd.line[L],
@@ -561,6 +574,15 @@ function taScore(ind) {
   if (ind.ichimoku.tenkan > ind.ichimoku.kijun) s += .5; else s -= .5;
   if (ind.trix > 0) s += .5; else if (ind.trix < 0) s -= .5;
   if (ind.chaikin > 0) s += .5; else if (ind.chaikin < 0) s -= .5;
+  // ═══ Posición vs 52 semanas (CRÍTICO para evitar comprar en máximos) ═══
+  if (ind.rangePos != null) {
+    if (ind.rangePos >= 0.95) { s -= 4; R.push("\u26A0 En m\u00E1ximo 52w"); }
+    else if (ind.rangePos >= 0.85) { s -= 2.5; R.push("Cerca m\u00E1ximo 52w"); }
+    else if (ind.rangePos >= 0.75) { s -= 1; R.push("Zona alta 52w"); }
+    else if (ind.rangePos <= 0.05) { s += 4; R.push("\uD83C\uDFAF En m\u00EDnimo 52w"); }
+    else if (ind.rangePos <= 0.15) { s += 2.5; R.push("Cerca m\u00EDnimo 52w"); }
+    else if (ind.rangePos <= 0.25) { s += 1; R.push("Zona baja 52w"); }
+  }
   const n = Math.max(-10, Math.min(10, s));
   let sig, col;
   if (n >= 5) { sig = "COMPRA FUERTE"; col = "#10b981"; }
@@ -792,16 +814,23 @@ function App() {
       for (var i = 0; i < tickers.length; i++) {
         var t = tickers[i];
         setProg({ cur: i + 1, tot: tickers.length, t: t.replace(".BA", "") });
-        try {
-          var data = await yf(t, "2y");
-          if (data.quote) setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
-          if (data.candles) {
-            var ind = analyze(data.candles);
-            var sig = portfolioScore(ind, t, portfolio, alerts);
-            results.push(Object.assign({ ticker: t, indicators: ind, quote: data.quote, ts: Date.now() }, sig));
+        var ok = false;
+        for (var attempt = 0; attempt < 3 && !ok; attempt++) {
+          try {
+            var data = await yf(t, "2y");
+            if (data.quote) setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
+            if (data.candles && data.candles.length >= 60) {
+              var ind = analyze(data.candles);
+              var sig = portfolioScore(ind, t, portfolio, alerts);
+              results.push(Object.assign({ ticker: t, indicators: ind, quote: data.quote, ts: Date.now() }, sig));
+              ok = true;
+            }
+          } catch (e) {
+            if (attempt === 2) errs.push(t.replace(".BA", "") + ": " + e.message);
+            else await new Promise(function(r) { setTimeout(r, 1500); });
           }
-          await new Promise(function(r) { setTimeout(r, 400); });
-        } catch (e) { errs.push(t.replace(".BA", "") + ": " + e.message); }
+        }
+        await new Promise(function(r) { setTimeout(r, 500); });
       }
       // Macro también en training
       setProg({ cur: tickers.length, tot: tickers.length + 1, t: "Macro..." });
@@ -811,6 +840,40 @@ function App() {
       results.sort(function(a, b) { return b.score - a.score; });
       setTrained(true);
       DB.set("signals-cache", results);
+
+    } else if (mode === "complete") {
+      // ═══ COMPLETAR ENTRENAMIENTO ═══
+      // Solo procesa tickers marcados "sin entrenar" o ausentes, secuencialmente
+      var existing = await DB.get("signals-cache", []) || [];
+      var existingMap = {};
+      existing.forEach(function(s) { if (s.indicators) existingMap[s.ticker] = s; });
+      var pending = ALL_TICKERS.filter(function(t) { return !existingMap[t]; });
+      setProg({ cur: 0, tot: pending.length, t: "Completando " + pending.length + " tickers..." });
+      var completedResults = existing.slice();
+      for (var i = 0; i < pending.length; i++) {
+        var t = pending[i];
+        setProg({ cur: i + 1, tot: pending.length, t: t.replace(".BA", "") });
+        var ok = false;
+        for (var attempt = 0; attempt < 3 && !ok; attempt++) {
+          try {
+            var data = await yf(t, "2y");
+            if (data.quote) setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
+            if (data.candles && data.candles.length >= 60) {
+              var ind = analyze(data.candles);
+              var sig = portfolioScore(ind, t, portfolio, alerts);
+              completedResults.push(Object.assign({ ticker: t, indicators: ind, quote: data.quote, ts: Date.now() }, sig));
+              ok = true;
+            }
+          } catch (e) {
+            if (attempt === 2) errs.push(t.replace(".BA", "") + ": " + e.message);
+            else await new Promise(function(r) { setTimeout(r, 1500); });
+          }
+        }
+        await new Promise(function(r) { setTimeout(r, 700); });
+      }
+      completedResults.sort(function(a, b) { return b.score - a.score; });
+      results = completedResults;
+      DB.set("signals-cache", completedResults);
 
     } else if (mode === "daily") {
       // ═══ DIARIO (1x al abrir mercado) ═══
@@ -910,7 +973,7 @@ function App() {
 
     results.sort(function(a, b) { return b.score - a.score; });
     setSigs(results);
-    setLast(new Date().toLocaleTimeString("es-AR") + " (" + (mode === "train" ? "\uD83E\uDDE0" : mode === "daily" ? "\uD83C\uDF10" : "\uD83D\uDCCA") + ")");
+    setLast(new Date().toLocaleTimeString("es-AR") + " (" + (mode === "train" ? "\uD83E\uDDE0" : mode === "complete" ? "\uD83E\uDDE9" : mode === "daily" ? "\uD83C\uDF10" : "\uD83D\uDCCA") + ")");
     setScanErr(errs.length ? errs : null);
     DB.set("macro-cache", macro);
     setScanning(false);
@@ -2534,6 +2597,11 @@ function Cfg({
       fontWeight: 500
     }
   }, "Datos"), /*#__PURE__*/React.createElement("button", {
+    onClick: function() { if (runScan && !scanning) runScan("complete"); },
+    disabled: scanning,
+    className: "b bp",
+    style: { width: "100%", fontSize: 11, marginBottom: 4, opacity: scanning ? 0.4 : 1 }
+  }, "\uD83E\uDDE9 Completar entrenamiento faltante"), /*#__PURE__*/React.createElement("button", {
     onClick: async () => {
       const d = {
         portfolio: await DB.get("portfolio"),
