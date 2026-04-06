@@ -822,7 +822,7 @@ function App() {
       if (trainedSignals) trainedSignals.forEach(function(s) { trainedMap[s.ticker] = s; });
 
       setProg({ cur: 0, tot: allT.length, t: "Actualizando precios..." });
-      var BATCH = 8;
+      var BATCH = 5;
       for (var i = 0; i < allT.length; i += BATCH) {
         var batch = allT.slice(i, i + BATCH);
         setProg({ cur: Math.min(i + BATCH, allT.length), tot: allT.length, t: batch[0].replace(".BA", "") + "..." });
