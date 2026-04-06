@@ -2587,7 +2587,30 @@ try {
 
 </script>
 <script>
-if('serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('./sw.js').then(r=>{if('periodicSync' in r)r.periodicSync.register('byma-scan',{minInterval:30*60000}).catch(()=>{})}).catch(()=>{})});
+if('serviceWorker' in navigator)window.addEventListener('load',function(){
+  navigator.serviceWorker.register('./sw.js').then(function(reg){
+    if('periodicSync' in reg)reg.periodicSync.register('byma-scan',{minInterval:30*60000}).catch(function(){});
+    // Check for updates every 60s while app is open
+    setInterval(function(){reg.update().catch(function(){})},60000);
+    // When a new SW is found, tell it to activate immediately
+    reg.addEventListener('updatefound',function(){
+      var nw=reg.installing;
+      if(!nw)return;
+      nw.addEventListener('statechange',function(){
+        if(nw.state==='installed'&&navigator.serviceWorker.controller){
+          nw.postMessage('SKIP_WAITING');
+        }
+      });
+    });
+  }).catch(function(){});
+  // Reload when new SW takes control
+  var refreshing=false;
+  navigator.serviceWorker.addEventListener('controllerchange',function(){
+    if(refreshing)return;
+    refreshing=true;
+    window.location.reload();
+  });
+});
 let dp;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();dp=e;const b=document.createElement('button');b.textContent='📲 Instalar App';b.className='b bp';b.style.cssText='position:fixed;top:56px;right:12px;z-index:9999;font-size:12px;box-shadow:0 4px 20px rgba(59,130,246,.3)';b.onclick=()=>{dp.prompt();dp.userChoice.then(()=>{dp=null;b.remove()})};document.body.appendChild(b);setTimeout(()=>b.remove(),20000)});
 </script>
 </body>
