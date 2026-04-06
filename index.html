@@ -814,38 +814,45 @@ function App() {
 
     } else if (mode === "daily") {
       // ═══ DIARIO (1x al abrir mercado) ═══
-      // 1) Aprender de ayer: TODOS los tickers (5d para ver movimiento reciente)
-      // 2) Macro completo
-      // 3) Generar sugerencias de compra solo si hay capital
+      // Reusa indicadores del entrenamiento, solo actualiza precios (5d = rápido)
       var allT = ALL_TICKERS;
       var allResults = [];
-      setProg({ cur: 0, tot: allT.length, t: "Aprendiendo mercado..." });
-      for (var i = 0; i < allT.length; i++) {
-        var t = allT[i];
-        setProg({ cur: i + 1, tot: allT.length, t: t.replace(".BA", "") });
-        try {
-          var data = await yf(t, "1y");
-          if (data.quote) setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
-          if (data.candles) {
-            var ind = analyze(data.candles);
-            var sig = portfolioScore(ind, t, portfolio, alerts);
-            allResults.push(Object.assign({ ticker: t, indicators: ind, quote: data.quote, ts: Date.now() }, sig));
-          }
-          await new Promise(function(r) { setTimeout(r, 500); });
-        } catch (e) { errs.push(t.replace(".BA", "") + ": " + e.message); }
+      var trainedSignals = await DB.get("signals-cache", []);
+      var trainedMap = {};
+      if (trainedSignals) trainedSignals.forEach(function(s) { trainedMap[s.ticker] = s; });
+
+      setProg({ cur: 0, tot: allT.length, t: "Actualizando precios..." });
+      var BATCH = 8;
+      for (var i = 0; i < allT.length; i += BATCH) {
+        var batch = allT.slice(i, i + BATCH);
+        setProg({ cur: Math.min(i + BATCH, allT.length), tot: allT.length, t: batch[0].replace(".BA", "") + "..." });
+        await Promise.all(batch.map(async function(t) {
+          try {
+            var data = await yf(t, "5d");
+            if (data.quote) {
+              setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
+              var cached = trainedMap[t];
+              if (cached && cached.indicators) {
+                var sig = portfolioScore(cached.indicators, t, portfolio, alerts);
+                allResults.push(Object.assign({}, cached, sig, { quote: data.quote, ts: Date.now() }));
+              } else {
+                allResults.push({ ticker: t, quote: data.quote, signal: "sin entrenar", score: 0, color: "#6b7280", reasons: ["Entrenar para ver se\u00F1al"], confidence: 0, ts: Date.now() });
+              }
+            }
+          } catch (e) { errs.push(t.replace(".BA", "") + ": " + e.message); }
+        }));
+        await new Promise(function(r) { setTimeout(r, 300); });
       }
       // Macro + índices
       setProg({ cur: allT.length, tot: allT.length + 1, t: "Macro + \u00EDndices..." });
       for (var entry of Object.entries(MACRO_TICKERS)) {
-        try { var mD = await yf(entry[1], "5d"); if (mD.quote) setMacro(function(prev) { var n = Object.assign({}, prev); n[entry[0]] = mD.quote; n._ts = Date.now(); return n; }); await new Promise(function(r) { setTimeout(r, 500); }); } catch (e) {}
+        try { var mD = await yf(entry[1], "5d"); if (mD.quote) setMacro(function(prev) { var n = Object.assign({}, prev); n[entry[0]] = mD.quote; n._ts = Date.now(); return n; }); await new Promise(function(r) { setTimeout(r, 400); }); } catch (e) {}
       }
       allResults.sort(function(a, b) { return b.score - a.score; });
       results = allResults;
       DB.set("signals-cache", allResults);
-      // Sugerencias del día: solo si hay capital disponible
       if (portfolio.capital > 10000) {
         var picks = allResults.filter(function(r) {
-          // Solo tickers que NO tengo, con señal de compra
           var tengo = portfolio.positions.find(function(p) { return p.ticker === r.ticker; });
           return !tengo && r.score >= 2;
         }).slice(0, 5);
@@ -854,7 +861,6 @@ function App() {
         setDailyPicks([]);
       }
       setLastDaily(todayStr());
-      // Guardar resumen de ayer: top movers
       var movers = allResults.filter(function(r) { return r.quote && Math.abs(r.quote.change) > 3; }).sort(function(a, b) { return Math.abs(b.quote.change) - Math.abs(a.quote.change); }).slice(0, 10);
       DB.set("yesterday-movers", movers);
 
