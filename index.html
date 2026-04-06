@@ -822,22 +822,28 @@ function App() {
       if (trainedSignals) trainedSignals.forEach(function(s) { trainedMap[s.ticker] = s; });
 
       setProg({ cur: 0, tot: allT.length, t: "Actualizando precios..." });
-      for (var i = 0; i < allT.length; i++) {
-        var t = allT[i];
-        setProg({ cur: i + 1, tot: allT.length, t: t.replace(".BA", "") });
-        try {
-          var data = await yf(t, "5d");
-          if (data.quote) {
-            setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
-            var cached = trainedMap[t];
-            if (cached && cached.indicators) {
-              var sig = portfolioScore(cached.indicators, t, portfolio, alerts);
-              allResults.push(Object.assign({}, cached, sig, { quote: data.quote, ts: Date.now() }));
-            } else {
-              allResults.push({ ticker: t, quote: data.quote, signal: "sin entrenar", score: 0, color: "#6b7280", reasons: ["Entrenar para ver se\u00F1al"], confidence: 0, ts: Date.now() });
+      var BATCH_SIZE = 8;
+      var completed = 0;
+      for (var bi = 0; bi < allT.length; bi += BATCH_SIZE) {
+        var batch = allT.slice(bi, bi + BATCH_SIZE);
+        await Promise.all(batch.map(async function(t) {
+          try {
+            var data = await yf(t, "5d");
+            if (data.quote) {
+              setQ(function(prev) { var n = Object.assign({}, prev); n[t] = data.quote; return n; });
+              var cached = trainedMap[t];
+              if (cached && cached.indicators) {
+                var sig = portfolioScore(cached.indicators, t, portfolio, alerts);
+                allResults.push(Object.assign({}, cached, sig, { quote: data.quote, ts: Date.now() }));
+              } else {
+                allResults.push({ ticker: t, quote: data.quote, signal: "sin entrenar", score: 0, color: "#6b7280", reasons: ["Entrenar para ver se\u00F1al"], confidence: 0, ts: Date.now() });
+              }
             }
-          }
-        } catch (e) { errs.push(t.replace(".BA", "") + ": " + e.message); }
+          } catch (e) { errs.push(t.replace(".BA", "") + ": " + e.message); }
+          completed++;
+          setProg({ cur: completed, tot: allT.length, t: t.replace(".BA", "") });
+        }));
+        await new Promise(function(r) { setTimeout(r, 200); });
       }
       // Macro + índices
       setProg({ cur: allT.length, tot: allT.length + 1, t: "Macro + \u00EDndices..." });
